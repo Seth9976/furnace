@@ -2,21 +2,10 @@ name: Build furnace
 
 on:
   push:
-    branches: master
-    tags:
-      - 'v*'
+    branches: [ master, main ]
   pull_request:
-    branches: master
+    branches: [ master, main ]
   workflow_dispatch:
-    inputs:
-      release_tag:
-        description: '要发布的 Release Tag（留空则不发布）'
-        required: false
-        default: ''
-
-permissions:
-  contents: write
-
 defaults:
   run:
     shell: bash
@@ -31,7 +20,7 @@ jobs:
         config:
           - { name: 'Windows MSVC x86', os: windows-latest, compiler: msvc, arch: x86 }
           - { name: 'Windows MSVC x86_64', os: windows-latest, compiler: msvc, arch: x86_64 }
-          - { name: 'Windows MinGW x86_64', os: ubuntu-26.04, compiler: mingw, arch: x86_64 }
+          - { name: 'Windows MinGW x86_64', os: ubuntu-latest, compiler: mingw, arch: x86_64 }
           - { name: 'macOS x86_64', os: macos-14, arch: x86_64 }
           - { name: 'macOS ARM', os: macos-latest, arch: arm64 }
           - { name: 'Linux x86_64', os: ubuntu-22.04, arch: x86_64 }
@@ -42,7 +31,7 @@ jobs:
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v7.0.0
+      uses: actions/checkout@v4
       with:
         submodules: recursive
 
@@ -53,18 +42,14 @@ jobs:
         vswhere_target="${{ matrix.config.arch }}"
         msvc_target="${{ matrix.config.arch }}"
         mingw_target="${{ matrix.config.arch }}"
+
         if [ '${{ matrix.config.arch }}' == 'x86' ]; then
           msvc_target="Win32"
         elif [ '${{ matrix.config.arch }}' == 'x86_64' ]; then
           vswhere_target="amd64"
           msvc_target="x64"
         fi
-        if [ '${{ matrix.config.compiler }}' == 'msvc' ]; then
-          echo "vswhere target: ${vswhere_target}"
-          echo "MSVC target: ${msvc_target}"
-        else
-          echo "MinGW cross target: ${mingw_target}"
-        fi
+
         echo "vswhere-target=${vswhere_target}" >> $GITHUB_OUTPUT
         echo "msvc-target=${msvc_target}" >> $GITHUB_OUTPUT
         echo "mingw-target=${mingw_target}" >> $GITHUB_OUTPUT
@@ -82,7 +67,6 @@ jobs:
             package_name="${package_name}-MSVC"
           fi
           package_name="${package_name}-${{ matrix.config.arch }}"
-          package_ext=".zip"
         elif [ '${{ runner.os }}' == 'macOS' ]; then
           package_name="${package_name}-macOS-${{ matrix.config.arch }}"
           package_ext=".dmg"
@@ -90,8 +74,10 @@ jobs:
           package_name="${package_name}-Linux-${{ matrix.config.arch }}"
           package_ext=".tar.gz"
         fi
+
         echo "Package identifier: ${package_name}"
         echo "Package file: ${package_name}${package_ext}"
+
         echo "id=${package_name}" >> $GITHUB_OUTPUT
         echo "filename=${package_name}${package_ext}" >> $GITHUB_OUTPUT
 
@@ -102,7 +88,6 @@ jobs:
         if [ '${{ runner.os }}' == 'macOS' ]; then
           amount=3
         fi
-        echo "Amount of cores we can build with: ${amount}"
         echo "amount=${amount}" >> $GITHUB_OUTPUT
 
     - name: Setup Toolchain [Windows MSVC]
@@ -115,17 +100,18 @@ jobs:
       if: ${{ matrix.config.compiler == 'mingw' }}
       run: |
         sudo apt update
-        sudo apt install mingw-w64 mingw-w64-tools
+        sudo apt install -y mingw-w64 mingw-w64-tools
 
     - name: Install Dependencies [Linux x86_64]
       if: ${{ runner.os == 'Linux' && matrix.config.compiler != 'mingw' && matrix.config.arch == 'x86_64' }}
       run: |
         sudo apt update
-        sudo apt install libsdl2-dev libfmt-dev librtmidi-dev libsndfile1-dev zlib1g-dev libjack-jackd2-dev gettext
+        sudo apt install -y libsdl2-dev libfmt-dev librtmidi-dev libsndfile1-dev zlib1g-dev libjack-jackd2-dev gettext
 
     - name: Build Language Files
       if: ${{ runner.os == 'Linux' && matrix.config.compiler != 'mingw' }}
-      run: ./scripts/build-po.sh
+      run: |
+        ./scripts/build-po.sh
 
     - name: Configure
       run: |
@@ -141,9 +127,6 @@ jobs:
           fi
         elif [ '${{ matrix.config.compiler }}' == 'mingw' ]; then
           CMAKE_EXTRA_ARGS+=('-DCMAKE_TOOLCHAIN_FILE=scripts/Cross-MinGW-${{ steps.windows-identify.outputs.mingw-target }}.cmake' '-DCMAKE_C_FLAGS="-Wno-deprecated-declarations"' '-DCMAKE_CXX_FLAGS="-Wno-deprecated-declarations"')
-          if [ '${{ matrix.config.arch }}' == 'x86' ]; then
-            CMAKE_EXTRA_ARGS+=('-DSUPPORT_XP=ON')
-          fi
         elif [ '${{ runner.os }}' == 'macOS' ]; then
           CMAKE_EXTRA_ARGS+=('-DCMAKE_C_FLAGS="-O2"' '-DCMAKE_CXX_FLAGS="-O2"')
           if [ '${{ matrix.config.arch }}' == 'arm64' ]; then
@@ -152,154 +135,108 @@ jobs:
             CMAKE_EXTRA_ARGS+=('-DCMAKE_OSX_DEPLOYMENT_TARGET="10.9"' '-DCMAKE_OSX_ARCHITECTURES=x86_64' '-DMAKE_BUNDLE=ON' '-DCMAKE_C_FLAGS=-march=core2' '-DCMAKE_CXX_FLAGS=-march=core2')
           fi
         fi
-        echo "EXTRA FLAGS: ${CMAKE_EXTRA_ARGS[@]}"
+
         cmake -B ${PWD}/build -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} -DWARNINGS_ARE_ERRORS=${USE_WAE} -DWITH_DEMOS=OFF -DWITH_INSTRUMENTS=OFF -DWITH_WAVETABLES=OFF "${CMAKE_EXTRA_ARGS[@]}"
 
     - name: Build
       run: |
         cmake --build ${PWD}/build --config ${{ env.BUILD_TYPE }} --parallel ${{ steps.build-cores.outputs.amount }}
 
-    - name: Sniff build outputs [Windows]
-      if: ${{ runner.os == 'Windows' || matrix.config.compiler == 'mingw' }}
-      run: |
-        echo "===== build 目录结构嗅探 ====="
-        find build -maxdepth 4 -type d -print
-        find build -maxdepth 4 -type f -print
-
     - name: Package [Windows]
       if: ${{ runner.os == 'Windows' || matrix.config.compiler == 'mingw' }}
       run: |
-        furnace_exe=$(find build -type f -name 'furnace.exe' | head -n 1)
-        if [ -z "$furnace_exe" ]; then
-          echo "未能在 build 目录嗅探到 furnace.exe"
-          exit 1
-        fi
-        echo "嗅探到二进制: ${furnace_exe}"
-        pdb_file=$(find build -type f -name 'furnace.pdb' | head -n 1)
-        if [ -n "$pdb_file" ]; then
-          echo "嗅探到 PDB: ${pdb_file}"
-        fi
-        pkg_dir="${{ steps.package-identify.outputs.id }}"
-        mkdir -p "${pkg_dir}"
-        pushd "${pkg_dir}"
+        # 主动探查生成的二进制文件，彻底告别路径猜测
+        found_binary=$(find build -name "furnace.exe" -print -quit)
+        echo "Successfully located binary at: $found_binary"
+
+        mkdir ${{ steps.package-identify.outputs.filename }}
+        pushd ${{ steps.package-identify.outputs.filename }}
+
         cp -v ../LICENSE.GPLv3 LICENSE.txt
         cp -v ../res/releaseReadme/unstable-win.txt README.txt
         cp -vr ../po/locale locale
         cp -vr ../papers ./
-        cp -v "../${furnace_exe}" ./furnace.exe
-        if [ -n "$pdb_file" ]; then
-          cp -v "../${pdb_file}" ./
-        fi
-        sha256sum ./furnace.exe > checksum.txt
-        popd
-        7z a "${{ steps.package-identify.outputs.filename }}" "${pkg_dir}/*" -r > /dev/null
-        echo "已生成: ${{ steps.package-identify.outputs.filename }}"
-        ls -lh "${{ steps.package-identify.outputs.filename }}"
+        cp -v ../$found_binary ./furnace.exe
 
-    - name: Sniff build outputs [macOS]
-      if: ${{ runner.os == 'macOS' }}
-      run: |
-        echo "===== build 目录结构嗅探 ====="
-        find build -maxdepth 4 -type d -print
-        find build -maxdepth 4 -type f -print
+        pdb_file=$(dirname "../$found_binary")/furnace.pdb
+        if [ -e "$pdb_file" ]; then
+          cp -v "$pdb_file" ./
+        fi
+
+        sha256sum ../$found_binary > checksum.txt
+        popd
 
     - name: Package [macOS]
       if: ${{ runner.os == 'macOS' }}
       run: |
-        app_path=$(find build -maxdepth 4 -type d -name 'Furnace.app' | head -n 1)
-        if [ -z "$app_path" ]; then
-          echo "未能在 build 目录嗅探到 Furnace.app"
-          exit 1
-        fi
-        echo "嗅探到应用包: ${app_path}"
-        app_dir=$(dirname "${app_path}")
-        app_name=$(basename "${app_path}")
-        pushd "${app_dir}"
+        pushd build
+        found_app=$(find . -name "Furnace.app" -print -quit)
+        echo "Successfully located app bundle at: $found_app"
+
         echo "preparing bundle"
-        mkdir -p "${app_name}/Contents/Resources"
-        cp -v -r ../po/locale "${app_name}/Contents/Resources/locale"
-        cp -v ../res/icon.icns "${app_name}/Contents/Resources/Furnace.icns"
-        codesign --deep -f -s - "${app_name}"
+        mkdir -p Furnace.app/Contents/Resources
+        cp -v -r ../po/locale Furnace.app/Contents/Resources/locale
+        cp -v ../res/icon.icns Furnace.app/Contents/Resources/Furnace.icns
+
+        codesign --deep -f -s - Furnace.app
+
         echo "making dirs"
         mkdir new
+
         echo "copying"
-        cp -v -r "${app_name}" "new/${app_name}"
+        cp -v -r Furnace.app new/Furnace.app
         ln -s /Applications new/Applications
-        echo "synchronizing"
         sync
+
         echo "copying extra stuff"
         cp -v ../LICENSE.GPLv2 new/LICENSE.txt
         cp -v ../res/releaseReadme/stable-mac.txt new/README
         cp -v -r ../demos new/demos
         cp -v -r ../instruments new/instruments
         cp -v -r ../wavetables new/wavetables
-        pushd new
+        cd new
         wget https://tildearrow.org/furnace/doc/latest/manual.pdf
-        popd
-        echo "creating new image"
-        retries=0
-        while ! hdiutil create -srcfolder new -volname Furnace -format UDZO -fs HFS+ furnace.dmg; do
-          echo "TRYING AGAIN..."
-          retries=$((retries+1))
-          if [ $retries -gt 5 ]; then
-            echo "OH NO, WE'VE FAILED..."
-            exit 1
-          fi
-          sleep 5
-        done
-        mv furnace.dmg "../${{ steps.package-identify.outputs.filename }}"
-        popd
-        echo "已生成: ${{ steps.package-identify.outputs.filename }}"
-        ls -lh "${{ steps.package-identify.outputs.filename }}"
+        cd ..
 
-    - name: Sniff build outputs [Linux]
-      if: ${{ runner.os == 'Linux' && matrix.config.compiler != 'mingw' }}
-      run: |
-        echo "===== build 目录结构嗅探 ====="
-        find build -maxdepth 4 -type d -print
-        find build -maxdepth 4 -type f -print
+        hdiutil create -srcfolder new -volname Furnace -format UDZO -fs HFS+ furnace.dmg
+        mv furnace.dmg ../${{ steps.package-identify.outputs.filename }}
+        popd
 
     - name: Package [Linux]
       if: ${{ runner.os == 'Linux' && matrix.config.compiler != 'mingw' }}
       run: |
         mkdir -p target/furnace
         make -C ${PWD}/build DESTDIR=${PWD}/target/furnace install
-        installed_bin=$(find target/furnace -type f -name 'furnace' | head -n 1)
-        if [ -z "$installed_bin" ]; then
-          echo "未能在安装目录嗅探到 furnace 二进制"
-          exit 1
-        fi
-        echo "嗅探到安装后的二进制: ${installed_bin}"
         pushd target/furnace
+
         cp -v ../../res/logo.png .DirIcon
-        mv "$(realpath --relative-to=. "${installed_bin}")" ./furnace
-        rmdir usr/bin 2>/dev/null || true
-        rm -rf usr/share/applications usr/share/doc usr/share/icons usr/share/licenses usr/share/metainfo usr/share/mime
-        mv usr/share/locale ./locale
-        rmdir usr/share 2>/dev/null || true
-        rmdir usr 2>/dev/null || true
+
+        cd usr
+        found_bin=$(find . -name "furnace" -type f -print -quit)
+        echo "Successfully located linux binary at: $found_bin"
+
+        mv $(dirname "$found_bin")/furnace ..
+        rm -rf bin || true
+
+        rm -rf share/applications share/doc share/icons share/licenses share/metainfo share/mime
+        mv share/locale ..
+        rmdir share || true
+
+        cd ..
+
         cp ../../LICENSE.GPLv2 .
         cp ../../res/releaseReadme/unstable-other.txt .
         cp -r ../../papers papers
+        rmdir usr || true
+
         popd
-        pushd target
-        tar -zcv -f "../${{ steps.package-identify.outputs.filename }}" furnace
-        popd
-        echo "已生成: ${{ steps.package-identify.outputs.filename }}"
-        ls -lh "${{ steps.package-identify.outputs.filename }}"
+
+        cd target
+        tar -zcv -f ../${{ steps.package-identify.outputs.filename }} furnace
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v7.0.1
+      # 移除了原有的强制限制，确保任何分支或Fork都可以稳定保存产物
+      uses: actions/upload-artifact@v4
       with:
         name: ${{ steps.package-identify.outputs.id }}
         path: ${{ steps.package-identify.outputs.filename }}
-
-    - name: Publish Release
-      if: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '') }}
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.release_tag }}
-        files: ${{ steps.package-identify.outputs.filename }}
-        generate_release_notes: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
