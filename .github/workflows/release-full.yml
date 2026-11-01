@@ -3,9 +3,11 @@ name: Build furnace
 on:  
   push:  
     branches: [ master, main ]  
+    tags: [ 'v*' ]  
   pull_request:  
     branches: [ master, main ]  
   workflow_dispatch:  
+  
 defaults:  
   run:  
     shell: bash  
@@ -13,12 +15,10 @@ defaults:
 env:  
   BUILD_TYPE: Debug  
   
-permissions:  
-  contents: write  
-  
 jobs:  
   build:  
     strategy:  
+      fail-fast: false  
       matrix:  
         config:  
           - { name: 'Windows MSVC x86', os: windows-latest, compiler: msvc, arch: x86 }  
@@ -27,10 +27,9 @@ jobs:
           - { name: 'macOS x86_64', os: macos-14, arch: x86_64 }  
           - { name: 'macOS ARM', os: macos-latest, arch: arm64 }  
           - { name: 'Linux x86_64', os: ubuntu-22.04, arch: x86_64 }  
-        variant: [ gui, console ]  
-      fail-fast: true  
+        mode: [ gui, console ]  
   
-    name: ${{ matrix.config.name }} (${{ matrix.variant }})  
+    name: ${{ matrix.config.name }} (${{ matrix.mode }})  
     runs-on: ${{ matrix.config.os }}  
   
     steps:  
@@ -46,31 +45,20 @@ jobs:
         vswhere_target="${{ matrix.config.arch }}"  
         msvc_target="${{ matrix.config.arch }}"  
         mingw_target="${{ matrix.config.arch }}"  
-  
         if [ '${{ matrix.config.arch }}' == 'x86' ]; then  
           msvc_target="Win32"  
         elif [ '${{ matrix.config.arch }}' == 'x86_64' ]; then  
           vswhere_target="amd64"  
           msvc_target="x64"  
         fi  
-  
         echo "vswhere-target=${vswhere_target}" >> $GITHUB_OUTPUT  
         echo "msvc-target=${msvc_target}" >> $GITHUB_OUTPUT  
         echo "mingw-target=${mingw_target}" >> $GITHUB_OUTPUT  
   
-    - name: Set variant identifier  
-      id: variant-identify  
-      run: |  
-        variant_tag="GUI"  
-        if [ '${{ matrix.variant }}' == 'console' ]; then  
-          variant_tag="CLI"  
-        fi  
-        echo "tag=${variant_tag}" >> $GITHUB_OUTPUT  
-  
     - name: Set package identifier  
       id: package-identify  
       run: |  
-        package_name="furnace-${GITHUB_SHA}"  
+        package_name="furnace-${GITHUB_SHA}-${{ matrix.mode }}"  
         package_ext=""  
         if [ '${{ runner.os }}' == 'Windows' ] || [ '${{ matrix.config.compiler }}' == 'mingw' ]; then  
           package_name="${package_name}-Windows"  
@@ -82,22 +70,17 @@ jobs:
           package_name="${package_name}-${{ matrix.config.arch }}"  
         elif [ '${{ runner.os }}' == 'macOS' ]; then  
           package_name="${package_name}-macOS-${{ matrix.config.arch }}"  
+          if [ '${{ matrix.mode }}' == 'gui' ]; then  
+            package_ext=".dmg"  
+          else  
+            package_ext=".tar.gz"  
+          fi  
         else  
           package_name="${package_name}-Linux-${{ matrix.config.arch }}"  
+          package_ext=".tar.gz"  
         fi  
-  
-        package_name="${package_name}-${{ steps.variant-identify.outputs.tag }}"  
-  
-        package_ext=".tar.gz"  
-        if [ '${{ runner.os }}' == 'Windows' ] || [ '${{ matrix.config.compiler }}' == 'mingw' ]; then  
-          package_ext=".zip"  
-        elif [ '${{ runner.os }}' == 'macOS' ] && [ '${{ matrix.variant }}' == 'gui' ]; then  
-          package_ext=".dmg"  
-        fi  
-  
         echo "Package identifier: ${package_name}"  
         echo "Package file: ${package_name}${package_ext}"  
-  
         echo "id=${package_name}" >> $GITHUB_OUTPUT  
         echo "filename=${package_name}${package_ext}" >> $GITHUB_OUTPUT  
   
@@ -122,11 +105,17 @@ jobs:
         sudo apt update  
         sudo apt install -y mingw-w64 mingw-w64-tools  
   
-    - name: Install Dependencies [Linux x86_64]  
-      if: ${{ runner.os == 'Linux' && matrix.config.compiler != 'mingw' && matrix.config.arch == 'x86_64' }}  
+    - name: Install Dependencies [Linux x86_64 GUI]  
+      if: ${{ runner.os == 'Linux' && matrix.config.compiler != 'mingw' && matrix.config.arch == 'x86_64' && matrix.mode == 'gui' }}  
       run: |  
         sudo apt update  
         sudo apt install -y libsdl2-dev libfmt-dev librtmidi-dev libsndfile1-dev zlib1g-dev libjack-jackd2-dev gettext  
+  
+    - name: Install Dependencies [Linux x86_64 Console]  
+      if: ${{ runner.os == 'Linux' && matrix.config.compiler != 'mingw' && matrix.config.arch == 'x86_64' && matrix.mode == 'console' }}  
+      run: |  
+        sudo apt update  
+        sudo apt install -y libfmt-dev libsndfile1-dev zlib1g-dev gettext  
   
     - name: Build Language Files  
       if: ${{ runner.os == 'Linux' && matrix.config.compiler != 'mingw' }}  
@@ -136,44 +125,38 @@ jobs:
     - name: Configure  
       run: |  
         export USE_WAE=OFF  
-        export BUILD_GUI_FLAG=ON  
-        export CONSOLE_SUBSYSTEM_FLAG=OFF  
         export CMAKE_EXTRA_ARGS=()  
-  
-        if [ '${{ matrix.variant }}' == 'console' ]; then  
-          BUILD_GUI_FLAG=OFF  
-          if [ '${{ runner.os }}' == 'Windows' ] || [ '${{ matrix.config.compiler }}' == 'mingw' ]; then  
-            CONSOLE_SUBSYSTEM_FLAG=ON  
-          fi  
+        if [ '${{ matrix.mode }}' == 'console' ]; then  
+          CMAKE_EXTRA_ARGS+=('-DBUILD_GUI=OFF')  
         fi  
-  
         if [ '${{ matrix.config.compiler }}' == 'msvc' ]; then  
           CMAKE_EXTRA_ARGS+=('-DCMAKE_GENERATOR_PLATFORM=${{ steps.windows-identify.outputs.msvc-target }}')  
           CMAKE_EXTRA_ARGS+=('-DCMAKE_POLICY_DEFAULT_CMP0091=NEW')  
+          CMAKE_EXTRA_ARGS+=('-DCONSOLE_SUBSYSTEM=ON')  
           if [ '${{ env.BUILD_TYPE }}' == 'Debug' ]; then  
             CMAKE_EXTRA_ARGS+=('-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebug')  
           else  
             CMAKE_EXTRA_ARGS+=('-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded')  
           fi  
         elif [ '${{ matrix.config.compiler }}' == 'mingw' ]; then  
-          CMAKE_EXTRA_ARGS+=('-DCMAKE_TOOLCHAIN_FILE=scripts/Cross-MinGW-${{ steps.windows-identify.outputs.mingw-target }}.cmake' '-DCMAKE_C_FLAGS="-Wno-deprecated-declarations"' '-DCMAKE_CXX_FLAGS="-Wno-deprecated-declarations"')  
+          CMAKE_EXTRA_ARGS+=('-DCMAKE_TOOLCHAIN_FILE=scripts/Cross-MinGW-${{ steps.windows-identify.outputs.mingw-target }}.cmake' '-DCMAKE_C_FLAGS=-Wno-deprecated-declarations' '-DCMAKE_CXX_FLAGS=-Wno-deprecated-declarations')  
         elif [ '${{ runner.os }}' == 'macOS' ]; then  
-          CMAKE_EXTRA_ARGS+=('-DCMAKE_C_FLAGS="-O2"' '-DCMAKE_CXX_FLAGS="-O2"')  
-          if [ '${{ matrix.config.arch }}' == 'arm64' ]; then  
-            CMAKE_EXTRA_ARGS+=('-DCMAKE_OSX_DEPLOYMENT_TARGET="11.0"' '-DCMAKE_OSX_ARCHITECTURES=arm64')  
-          else  
-            CMAKE_EXTRA_ARGS+=('-DCMAKE_OSX_DEPLOYMENT_TARGET="10.9"' '-DCMAKE_OSX_ARCHITECTURES=x86_64' '-DCMAKE_C_FLAGS=-march=core2' '-DCMAKE_CXX_FLAGS=-march=core2')  
-          fi  
-          if [ '${{ matrix.variant }}' == 'gui' ]; then  
-            CMAKE_EXTRA_ARGS+=('-DMAKE_BUNDLE=ON')  
+          CMAKE_EXTRA_ARGS+=('-DCMAKE_C_FLAGS=-O2' '-DCMAKE_CXX_FLAGS=-O2')  
+          if [ '${{ matrix.mode }}' == 'gui' ]; then  
+            if [ '${{ matrix.config.arch }}' == 'arm64' ]; then  
+              CMAKE_EXTRA_ARGS+=('-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0' '-DCMAKE_OSX_ARCHITECTURES=arm64' '-DMAKE_BUNDLE=ON')  
+            else  
+              CMAKE_EXTRA_ARGS+=('-DCMAKE_OSX_DEPLOYMENT_TARGET=10.9' '-DCMAKE_OSX_ARCHITECTURES=x86_64' '-DMAKE_BUNDLE=ON' '-DCMAKE_C_FLAGS=-march=core2' '-DCMAKE_CXX_FLAGS=-march=core2')  
+            fi  
           else  
             CMAKE_EXTRA_ARGS+=('-DMAKE_BUNDLE=OFF')  
+            if [ '${{ matrix.config.arch }}' == 'arm64' ]; then  
+              CMAKE_EXTRA_ARGS+=('-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0' '-DCMAKE_OSX_ARCHITECTURES=arm64')  
+            else  
+              CMAKE_EXTRA_ARGS+=('-DCMAKE_OSX_DEPLOYMENT_TARGET=10.9' '-DCMAKE_OSX_ARCHITECTURES=x86_64')  
+            fi  
           fi  
         fi  
-  
-        CMAKE_EXTRA_ARGS+=("-DBUILD_GUI=${BUILD_GUI_FLAG}")  
-        CMAKE_EXTRA_ARGS+=("-DCONSOLE_SUBSYSTEM=${CONSOLE_SUBSYSTEM_FLAG}")  
-  
         cmake -B ${PWD}/build -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} -DWARNINGS_ARE_ERRORS=${USE_WAE} -DWITH_DEMOS=OFF -DWITH_INSTRUMENTS=OFF -DWITH_WAVETABLES=OFF "${CMAKE_EXTRA_ARGS[@]}"  
   
     - name: Build  
@@ -183,88 +166,63 @@ jobs:
     - name: Package [Windows]  
       if: ${{ runner.os == 'Windows' || matrix.config.compiler == 'mingw' }}  
       run: |  
-        found_binary=$(find build -iname "furnace.exe" -type f -print -quit)  
+        found_binary=$(find build -type f -name "*.exe" -print -quit)  
         echo "Successfully located binary at: $found_binary"  
-  
-        mkdir ${{ steps.package-identify.outputs.id }}  
-        pushd ${{ steps.package-identify.outputs.id }}  
-  
+        mkdir ${{ steps.package-identify.outputs.filename }}  
+        pushd ${{ steps.package-identify.outputs.filename }}  
         cp -v ../LICENSE.GPLv3 LICENSE.txt  
-        cp -v ../$found_binary ./furnace.exe  
-  
-        pdb_file=$(dirname "../$found_binary")/furnace.pdb  
+        cp -v ../res/releaseReadme/unstable-win.txt README.txt  
+        cp -vr ../po/locale locale  
+        cp -vr ../papers ./  
+        cp -v "../${found_binary}" ./furnace.exe  
+        pdb_file="$(dirname "../${found_binary}")/furnace.pdb"  
         if [ -e "$pdb_file" ]; then  
           cp -v "$pdb_file" ./  
         fi  
-  
-        if [ '${{ matrix.variant }}' == 'gui' ]; then  
-          cp -v ../res/releaseReadme/unstable-win.txt README.txt  
-          cp -vr ../po/locale locale  
-          cp -vr ../papers ./  
-        else  
-          echo "console build - furnace -console <file>" > README.txt  
+        found_pdb=$(find ../build -type f -name "*.pdb" -print -quit)  
+        if [ -n "$found_pdb" ] && [ ! -e furnace.pdb ]; then  
+          cp -v "$found_pdb" ./  
         fi  
-  
-        sha256sum furnace.exe > checksum.txt  
+        sha256sum "../${found_binary}" > checksum.txt  
         popd  
   
-        pushd ${{ steps.package-identify.outputs.id }}  
-        zip -r ../${{ steps.package-identify.outputs.filename }} .  
-        popd  
-  
-    - name: Package [macOS]  
-      if: ${{ runner.os == 'macOS' && matrix.variant == 'gui' }}  
+    - name: Package [macOS GUI]  
+      if: ${{ runner.os == 'macOS' && matrix.mode == 'gui' }}  
       run: |  
         pushd build  
-        found_app=$(find . -iname "Furnace.app" -print -quit)  
+        found_app=$(find . -type d -name "*.app" -print -quit)  
         echo "Successfully located app bundle at: $found_app"  
-  
         echo "preparing bundle"  
-        mkdir -p Furnace.app/Contents/Resources  
-        cp -v -r ../po/locale Furnace.app/Contents/Resources/locale  
-        cp -v ../res/icon.icns Furnace.app/Contents/Resources/Furnace.icns  
-  
-        codesign --deep -f -s - Furnace.app  
-  
+        mkdir -p "$found_app/Contents/Resources"  
+        cp -v -r ../po/locale "$found_app/Contents/Resources/locale"  
+        cp -v ../res/icon.icns "$found_app/Contents/Resources/Furnace.icns"  
+        codesign --deep -f -s - "$found_app"  
         echo "making dirs"  
         mkdir new  
-  
         echo "copying"  
-        cp -v -r Furnace.app new/Furnace.app  
+        cp -v -r "$found_app" new/Furnace.app  
         ln -s /Applications new/Applications  
         sync  
-  
         echo "copying extra stuff"  
         cp -v ../LICENSE.GPLv2 new/LICENSE.txt  
         cp -v ../res/releaseReadme/stable-mac.txt new/README  
         cp -v -r ../demos new/demos  
         cp -v -r ../instruments new/instruments  
         cp -v -r ../wavetables new/wavetables  
-        cd new  
-        wget https://tildearrow.org/furnace/doc/latest/manual.pdf  
-        cd ..  
-  
         hdiutil create -srcfolder new -volname Furnace -format UDZO -fs HFS+ furnace.dmg  
         mv furnace.dmg ../${{ steps.package-identify.outputs.filename }}  
         popd  
   
     - name: Package [macOS Console]  
-      if: ${{ runner.os == 'macOS' && matrix.variant == 'console' }}  
+      if: ${{ runner.os == 'macOS' && matrix.mode == 'console' }}  
       run: |  
-        found_binary=$(find build -iname "furnace" -type f -perm +111 -print -quit)  
-        echo "Successfully located binary at: $found_binary"  
-  
-        mkdir ${{ steps.package-identify.outputs.id }}  
-        pushd ${{ steps.package-identify.outputs.id }}  
-  
-        cp -v ../$found_binary ./furnace  
-        cp -v ../LICENSE.GPLv2 LICENSE.txt  
-        echo "console build - ./furnace -console <file>" > README.txt  
-  
-        shasum -a 256 furnace > checksum.txt  
-        popd  
-  
-        tar -zcv -f ${{ steps.package-identify.outputs.filename }} ${{ steps.package-identify.outputs.id }}  
+        found_bin=$(find build -type f -perm +111 -name "furnace*" ! -name "*.o" ! -name "*.cmake" -print -quit)  
+        echo "Successfully located console binary at: $found_bin"  
+        mkdir pkg  
+        cp -v "$found_bin" pkg/furnace  
+        cp -v LICENSE.GPLv2 pkg/LICENSE.txt  
+        cp -v res/releaseReadme/unstable-other.txt pkg/README.txt  
+        tar -zcv -f ${{ steps.package-identify.outputs.filename }} -C pkg .  
   
     - name: Package [Linux]  
       if: ${{ runner.os == 'Linux' && matrix.config.compiler != 'mingw' }}  
@@ -272,35 +230,21 @@ jobs:
         mkdir -p target/furnace  
         make -C ${PWD}/build DESTDIR=${PWD}/target/furnace install  
         pushd target/furnace  
-  
         cp -v ../../res/logo.png .DirIcon  
-  
         cd usr  
-        found_bin=$(find . -iname "furnace" -type f -print -quit)  
+        found_bin=$(find . -type f -name "furnace*" ! -name "*.desktop" -print -quit)  
         echo "Successfully located linux binary at: $found_bin"  
-  
-        mv $(dirname "$found_bin")/furnace ..  
+        mv "$(dirname "$found_bin")/furnace" ..  
         rm -rf bin || true  
-  
         rm -rf share/applications share/doc share/icons share/licenses share/metainfo share/mime  
-        mv share/locale ..  
+        mv share/locale .. 2>/dev/null || true  
         rmdir share || true  
-  
         cd ..  
-  
         cp ../../LICENSE.GPLv2 .  
-  
-        if [ '${{ matrix.variant }}' == 'gui' ]; then  
-          cp ../../res/releaseReadme/unstable-other.txt .  
-          cp -r ../../papers papers  
-        else  
-          echo "console build - ./furnace -console <file>" > unstable-other.txt  
-        fi  
-  
+        cp ../../res/releaseReadme/unstable-other.txt .  
+        cp -r ../../papers papers  
         rmdir usr || true  
-  
         popd  
-  
         cd target  
         tar -zcv -f ../${{ steps.package-identify.outputs.filename }} furnace  
   
@@ -311,9 +255,9 @@ jobs:
         path: ${{ steps.package-identify.outputs.filename }}  
   
   release:  
-    name: Publish Release  
+    name: Publish release  
     needs: build  
-    if: ${{ github.event_name != 'pull_request' }}  
+    if: ${{ always() && needs.build.result != 'cancelled' && (github.event_name != 'pull_request') }}  
     runs-on: ubuntu-latest  
     permissions:  
       contents: write  
@@ -328,11 +272,13 @@ jobs:
       run: |  
         find artifacts -type f -print  
   
-    - name: Publish to Release page  
+    - name: Push to release  
       uses: softprops/action-gh-release@v2  
       with:  
-        tag_name: nightly-${{ github.run_number }}  
-        name: Nightly build ${{ github.run_number }} (${{ github.sha }})  
-        prerelease: true  
-        make_latest: false  
-        files: artifacts/*
+        files: artifacts/**  
+        tag_name: ${{ github.ref_name }}  
+        name: furnace-${{ github.sha }}  
+        draft: false  
+        prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}  
+      env:  
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
