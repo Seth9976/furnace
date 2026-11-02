@@ -1,145 +1,142 @@
-name: Build furnace
-
-on:
-  push:
-    branches: [ master, main ]
-    tags: [ 'v*' ]
-  pull_request:
-    branches: [ master, main ]
-  workflow_dispatch:
-
-defaults:
-  run:
-    shell: bash
-
-permissions:
-  contents: write
-
-env:
-  BUILD_TYPE: Debug
-
-jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        config:
-          - { name: 'Windows MSVC x86', os: windows-latest, compiler: msvc, arch: x86 }
-          - { name: 'Windows MSVC x86_64', os: windows-latest, compiler: msvc, arch: x86_64 }
-          - { name: 'Windows MinGW x86_64', os: ubuntu-latest, compiler: mingw, arch: x86_64 }
-          - { name: 'macOS x86_64', os: macos-14, arch: x86_64 }
-          - { name: 'macOS ARM', os: macos-latest, arch: arm64 }
-          - { name: 'Linux x86_64', os: ubuntu-22.04, arch: x86_64 }
-        variant:
-          - { id: gui, label: GUI, build_gui: 'ON', console_subsystem: 'OFF' }
-          - { id: console, label: Console, build_gui: 'OFF', console_subsystem: 'ON' }
-
-    name: ${{ matrix.config.name }} / ${{ matrix.variant.label }}
-    runs-on: ${{ matrix.config.os }}
-
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-      with:
-        submodules: recursive
-
-    - name: Set Windows arch identifiers
-      id: windows-identify
-      if: ${{ matrix.config.compiler == 'msvc' || matrix.config.compiler == 'mingw' }}
-      run: |
-        vswhere_target="${{ matrix.config.arch }}"
-        msvc_target="${{ matrix.config.arch }}"
-        mingw_target="${{ matrix.config.arch }}"
-        if [ '${{ matrix.config.arch }}' == 'x86' ]; then msvc_target="Win32"; fi
-        if [ '${{ matrix.config.arch }}' == 'x86_64' ]; then vswhere_target="amd64"; msvc_target="x64"; fi
-        echo "vswhere-target=${vswhere_target}" >> "$GITHUB_OUTPUT"
-        echo "msvc-target=${msvc_target}" >> "$GITHUB_OUTPUT"
-        echo "mingw-target=${mingw_target}" >> "$GITHUB_OUTPUT"
-
-    - name: Set package identifier
-      id: package-identify
-      run: |
-        package_name="furnace-${GITHUB_SHA}"
-        package_ext=""
-        if [ '${{ runner.os }}' == 'Windows' ] || [ '${{ matrix.config.compiler }}' == 'mingw' ]; then package_name="${package_name}-Windows"; package_ext=".zip"; fi
-        if [ '${{ matrix.config.compiler }}' == 'mingw' ]; then package_name="${package_name}-MinGW"; fi
-        if [ '${{ matrix.config.compiler }}' == 'msvc' ]; then package_name="${package_name}-MSVC"; fi
-        if [ '${{ runner.os }}' == 'Windows' ] || [ '${{ matrix.config.compiler }}' == 'mingw' ]; then package_name="${package_name}-${{ matrix.config.arch }}"; fi
-        if [ '${{ runner.os }}' == 'macOS' ]; then package_name="${package_name}-macOS-${{ matrix.config.arch }}"; package_ext=".tar.gz"; fi
-        if [ '${{ runner.os }}' == 'Linux' ] && [ '${{ matrix.config.compiler }}' != 'mingw' ]; then package_name="${package_name}-Linux-${{ matrix.config.arch }}"; package_ext=".tar.gz"; fi
-        if [ '${{ runner.os }}' == 'macOS' ] && [ '${{ matrix.variant.id }}' == 'gui' ]; then package_ext=".dmg"; fi
-        package_name="${package_name}-${{ matrix.variant.id }}"
-        echo "Package identifier: ${package_name}"
-        echo "Package file: ${package_name}${package_ext}"
-        echo "id=${package_name}" >> "$GITHUB_OUTPUT"
-        echo "filename=${package_name}${package_ext}" >> "$GITHUB_OUTPUT"
-
-    - name: Set build cores amount
-      id: build-cores
-      run: |
-        amount=2
-        if [ '${{ runner.os }}' == 'macOS' ]; then amount=3; fi
-        echo "amount=${amount}" >> "$GITHUB_OUTPUT"
-
-    - name: Setup Toolchain [Windows MSVC]
-      if: ${{ matrix.config.compiler == 'msvc' }}
-      uses: lunathir/gha-setup-vsdevenv@avoid-deprecation-warnings
-      with:
-        arch: ${{ steps.windows-identify.outputs.vswhere-target }}
-
-    - name: Setup Toolchain [Windows MinGW]
-      if: ${{ matrix.config.compiler == 'mingw' }}
-      run: |
-        sudo apt update
-        sudo apt install -y mingw-w64 mingw-w64-tools
-
-    - name: Install Dependencies [Linux x86_64]
-      if: ${{ runner.os == 'Linux' && matrix.config.compiler != 'mingw' && matrix.config.arch == 'x86_64' }}
-      run: |
-        sudo apt update
-        sudo apt install -y libsdl2-dev libfmt-dev librtmidi-dev libsndfile1-dev zlib1g-dev libjack-jackd2-dev gettext
-
-    - name: Build Language Files
-      if: ${{ runner.os == 'Linux' && matrix.config.compiler != 'mingw' }}
-      run: |
-        ./scripts/build-po.sh
-
-    - name: Configure
-      run: |
-        export USE_WAE=OFF
-        export CMAKE_EXTRA_ARGS=()
-        CMAKE_EXTRA_ARGS+=('-DBUILD_GUI=${{ matrix.variant.build_gui }}')
-        CMAKE_EXTRA_ARGS+=('-DCONSOLE_SUBSYSTEM=${{ matrix.variant.console_subsystem }}')
-        if [ '${{ matrix.config.compiler }}' == 'msvc' ]; then CMAKE_EXTRA_ARGS+=('-DCMAKE_GENERATOR_PLATFORM=${{ steps.windows-identify.outputs.msvc-target }}' '-DCMAKE_POLICY_DEFAULT_CMP0091=NEW'); fi
-        if [ '${{ matrix.config.compiler }}' == 'msvc' ] && [ '${{ env.BUILD_TYPE }}' == 'Debug' ]; then CMAKE_EXTRA_ARGS+=('-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebug'); fi
-        if [ '${{ matrix.config.compiler }}' == 'msvc' ] && [ '${{ env.BUILD_TYPE }}' != 'Debug' ]; then CMAKE_EXTRA_ARGS+=('-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded'); fi
-        if [ '${{ matrix.config.compiler }}' == 'mingw' ]; then CMAKE_EXTRA_ARGS+=('-DCMAKE_TOOLCHAIN_FILE=scripts/Cross-MinGW-${{ steps.windows-identify.outputs.mingw-target }}.cmake' '-DCMAKE_C_FLAGS=-Wno-deprecated-declarations' '-DCMAKE_CXX_FLAGS=-Wno-deprecated-declarations'); fi
-        if [ '${{ runner.os }}' == 'macOS' ] && [ '${{ matrix.config.arch }}' == 'arm64' ]; then CMAKE_EXTRA_ARGS+=('-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0' '-DCMAKE_OSX_ARCHITECTURES=arm64' '-DCMAKE_C_FLAGS=-O2' '-DCMAKE_CXX_FLAGS=-O2'); fi
-        if [ '${{ runner.os }}' == 'macOS' ] && [ '${{ matrix.config.arch }}' != 'arm64' ]; then CMAKE_EXTRA_ARGS+=('-DCMAKE_OSX_DEPLOYMENT_TARGET=10.9' '-DCMAKE_OSX_ARCHITECTURES=x86_64' '-DCMAKE_C_FLAGS=-O2 -march=core2' '-DCMAKE_CXX_FLAGS=-O2 -march=core2'); fi
-        if [ '${{ runner.os }}' == 'macOS' ] && [ '${{ matrix.variant.id }}' == 'gui' ]; then CMAKE_EXTRA_ARGS+=('-DMAKE_BUNDLE=ON'); fi
-        if [ '${{ runner.os }}' == 'macOS' ] && [ '${{ matrix.variant.id }}' == 'console' ]; then CMAKE_EXTRA_ARGS+=('-DMAKE_BUNDLE=OFF'); fi
-        cmake -B "${PWD}/build" -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE="${{ env.BUILD_TYPE }}" -DWARNINGS_ARE_ERRORS="${USE_WAE}" -DWITH_DEMOS=OFF -DWITH_INSTRUMENTS=OFF -DWITH_WAVETABLES=OFF -DBUILD_GUI="${{ matrix.variant.build_gui }}" -DCONSOLE_SUBSYSTEM="${{ matrix.variant.console_subsystem }}" "${CMAKE_EXTRA_ARGS[@]}"
-
-    - name: Build
-      run: |
-        cmake --build "${PWD}/build" --config "${{ env.BUILD_TYPE }}" --parallel ${{ steps.build-cores.outputs.amount }}
-
-    - name: Locate build outputs (binary sniffing)
-      id: locate-bin
-      run: |
-        bundle_path=$(find "${PWD}/build" -type d -name "*.app" -print -quit)
-        bin_path=$(find "${PWD}/build" -type f -iname "furnace*" -print | while read -r candidate; do if file "$candidate" | grep -q -E "executable|Mach-O|PE32"; then echo "$candidate"; break; fi; done)
-        if [ -z "$bin_path" ]; then echo "::error::sniffing failed: no furnace executable found under ${PWD}/build"; exit 1; fi
-        echo "bundle_path=${bundle_path}" >> "$GITHUB_OUTPUT"
-        echo "bin_path=${bin_path}" >> "$GITHUB_OUTPUT"
-        echo "bin_dir=$(dirname "$bin_path")" >> "$GITHUB_OUTPUT"
-        echo "bin_name=$(basename "$bin_path")" >> "$GITHUB_OUTPUT"
-        echo "bin_type=$(file -b "$bin_path")" >> "$GITHUB_OUTPUT"
-        echo "bin_size=$(wc -c < "$bin_path")" >> "$GITHUB_OUTPUT"
-        echo "Sniffed bundle: ${bundle_path}"
-        echo "Sniffed binary: ${bin_path}"
-        file "$bin_path"
-        ls -l "$bin_path"
+name: Build furnace  
+  
+on:  
+  push:  
+    branches: [ master, main ]  
+    tags: [ 'v*' ]  
+  pull_request:  
+    branches: [ master, main ]  
+  workflow_dispatch:  
+  
+defaults:  
+  run:  
+    shell: bash  
+  
+permissions:  
+  contents: write  
+  
+env:  
+  BUILD_TYPE: Debug  
+  
+jobs:  
+  build:  
+    strategy:  
+      fail-fast: false  
+      matrix:  
+        config:  
+          - { name: 'Windows MSVC x86', os: windows-latest, compiler: msvc, arch: x86 }  
+          - { name: 'Windows MSVC x86_64', os: windows-latest, compiler: msvc, arch: x86_64 }  
+          - { name: 'Windows MinGW x86_64', os: ubuntu-latest, compiler: mingw, arch: x86_64 }  
+          - { name: 'macOS x86_64', os: macos-14, arch: x86_64 }  
+          - { name: 'macOS ARM', os: macos-latest, arch: arm64 }  
+          - { name: 'Linux x86_64', os: ubuntu-22.04, arch: x86_64 }  
+        variant:  
+          - { id: gui, label: GUI, build_gui: 'ON', console_subsystem: 'OFF' }  
+          - { id: console, label: Console, build_gui: 'OFF', console_subsystem: 'ON' }  
+  
+    name: ${{ matrix.config.name }} / ${{ matrix.variant.label }}  
+    runs-on: ${{ matrix.config.os }}  
+  
+    steps:  
+    - name: Checkout  
+      uses: actions/checkout@v4  
+      with:  
+        submodules: recursive  
+  
+    - name: Set Windows arch identifiers  
+      id: windows-identify  
+      if: ${{ matrix.config.compiler == 'msvc' || matrix.config.compiler == 'mingw' }}  
+      run: |  
+        vswhere_target="${{ matrix.config.arch }}"  
+        msvc_target="${{ matrix.config.arch }}"  
+        mingw_target="${{ matrix.config.arch }}"  
+        if [ '${{ matrix.config.arch }}' == 'x86' ]; then msvc_target="Win32"; fi  
+        if [ '${{ matrix.config.arch }}' == 'x86_64' ]; then vswhere_target="amd64"; msvc_target="x64"; fi  
+        echo "vswhere-target=${vswhere_target}" >> "$GITHUB_OUTPUT"  
+        echo "msvc-target=${msvc_target}" >> "$GITHUB_OUTPUT"  
+        echo "mingw-target=${mingw_target}" >> "$GITHUB_OUTPUT"  
+  
+    - name: Set package identifier  
+      id: package-identify  
+      run: |  
+        package_name="furnace-${GITHUB_SHA}"  
+        package_ext=""  
+        if [ '${{ runner.os }}' == 'Windows' ] || [ '${{ matrix.config.compiler }}' == 'mingw' ]; then package_name="${package_name}-Windows"; package_ext=".zip"; fi  
+        if [ '${{ matrix.config.compiler }}' == 'mingw' ]; then package_name="${package_name}-MinGW"; fi  
+        if [ '${{ matrix.config.compiler }}' == 'msvc' ]; then package_name="${package_name}-MSVC"; fi  
+        if [ '${{ runner.os }}' == 'Windows' ] || [ '${{ matrix.config.compiler }}' == 'mingw' ]; then package_name="${package_name}-${{ matrix.config.arch }}"; fi  
+        if [ '${{ runner.os }}' == 'macOS' ]; then package_name="${package_name}-macOS-${{ matrix.config.arch }}"; package_ext=".tar.gz"; fi  
+        if [ '${{ runner.os }}' == 'Linux' ] && [ '${{ matrix.config.compiler }}' != 'mingw' ]; then package_name="${package_name}-Linux-${{ matrix.config.arch }}"; package_ext=".tar.gz"; fi  
+        if [ '${{ runner.os }}' == 'macOS' ] && [ '${{ matrix.variant.id }}' == 'gui' ]; then package_ext=".dmg"; fi  
+        package_name="${package_name}-${{ matrix.variant.id }}"  
+        echo "id=${package_name}" >> "$GITHUB_OUTPUT"  
+        echo "filename=${package_name}${package_ext}" >> "$GITHUB_OUTPUT"  
+  
+    - name: Set build cores amount  
+      id: build-cores  
+      run: |  
+        amount=2  
+        if [ '${{ runner.os }}' == 'macOS' ]; then amount=3; fi  
+        echo "amount=${amount}" >> "$GITHUB_OUTPUT"  
+  
+    - name: Setup Toolchain [Windows MSVC]  
+      if: ${{ matrix.config.compiler == 'msvc' }}  
+      uses: lunathir/gha-setup-vsdevenv@avoid-deprecation-warnings  
+      with:  
+        arch: ${{ steps.windows-identify.outputs.vswhere-target }}  
+  
+    - name: Setup Toolchain [Windows MinGW]  
+      if: ${{ matrix.config.compiler == 'mingw' }}  
+      run: |  
+        sudo apt update  
+        sudo apt install -y mingw-w64 mingw-w64-tools  
+  
+    - name: Install Dependencies [Linux x86_64]  
+      if: ${{ runner.os == 'Linux' && matrix.config.compiler != 'mingw' && matrix.config.arch == 'x86_64' }}  
+      run: |  
+        sudo apt update  
+        sudo apt install -y libsdl2-dev libfmt-dev librtmidi-dev libsndfile1-dev zlib1g-dev libjack-jackd2-dev gettext  
+  
+    - name: Build Language Files  
+      if: ${{ runner.os == 'Linux' && matrix.config.compiler != 'mingw' }}  
+      run: |  
+        ./scripts/build-po.sh  
+  
+    - name: Configure  
+      run: |  
+        export USE_WAE=OFF  
+        export CMAKE_EXTRA_ARGS=()  
+        CMAKE_EXTRA_ARGS+=('-DBUILD_GUI=${{ matrix.variant.build_gui }}')  
+        CMAKE_EXTRA_ARGS+=('-DCONSOLE_SUBSYSTEM=${{ matrix.variant.console_subsystem }}')  
+        if [ '${{ matrix.config.compiler }}' == 'msvc' ]; then CMAKE_EXTRA_ARGS+=('-DCMAKE_GENERATOR_PLATFORM=${{ steps.windows-identify.outputs.msvc-target }}' '-DCMAKE_POLICY_DEFAULT_CMP0091=NEW'); fi  
+        if [ '${{ matrix.config.compiler }}' == 'msvc' ] && [ '${{ env.BUILD_TYPE }}' == 'Debug' ]; then CMAKE_EXTRA_ARGS+=('-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebug'); fi  
+        if [ '${{ matrix.config.compiler }}' == 'msvc' ] && [ '${{ env.BUILD_TYPE }}' != 'Debug' ]; then CMAKE_EXTRA_ARGS+=('-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded'); fi  
+        if [ '${{ matrix.config.compiler }}' == 'mingw' ]; then CMAKE_EXTRA_ARGS+=('-DCMAKE_TOOLCHAIN_FILE=scripts/Cross-MinGW-${{ steps.windows-identify.outputs.mingw-target }}.cmake' '-DCMAKE_C_FLAGS=-Wno-deprecated-declarations' '-DCMAKE_CXX_FLAGS=-Wno-deprecated-declarations'); fi  
+        if [ '${{ runner.os }}' == 'macOS' ] && [ '${{ matrix.config.arch }}' == 'arm64' ]; then CMAKE_EXTRA_ARGS+=('-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0' '-DCMAKE_OSX_ARCHITECTURES=arm64' '-DCMAKE_C_FLAGS=-O2' '-DCMAKE_CXX_FLAGS=-O2'); fi  
+        if [ '${{ runner.os }}' == 'macOS' ] && [ '${{ matrix.config.arch }}' != 'arm64' ]; then CMAKE_EXTRA_ARGS+=('-DCMAKE_OSX_DEPLOYMENT_TARGET=10.9' '-DCMAKE_OSX_ARCHITECTURES=x86_64' '-DCMAKE_C_FLAGS=-O2 -march=core2' '-DCMAKE_CXX_FLAGS=-O2 -march=core2'); fi  
+        if [ '${{ runner.os }}' == 'macOS' ] && [ '${{ matrix.variant.id }}' == 'gui' ]; then CMAKE_EXTRA_ARGS+=('-DMAKE_BUNDLE=ON'); fi  
+        if [ '${{ runner.os }}' == 'macOS' ] && [ '${{ matrix.variant.id }}' == 'console' ]; then CMAKE_EXTRA_ARGS+=('-DMAKE_BUNDLE=OFF'); fi  
+        # <<< 新增: console 構建缺少 SDL.h 包含,強制注入頭文件 >>>  
+        if [ '${{ matrix.variant.id }}' == 'console' ] && [ '${{ matrix.config.compiler }}' == 'msvc' ]; then CMAKE_EXTRA_ARGS+=('-DCMAKE_CXX_FLAGS=/FISDL.h'); fi  
+        if [ '${{ matrix.variant.id }}' == 'console' ] && [ '${{ matrix.config.compiler }}' == 'mingw' ]; then CMAKE_EXTRA_ARGS+=('-DCMAKE_CXX_FLAGS=-include SDL.h'); fi  
+        cmake -B "${PWD}/build" -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE="${{ env.BUILD_TYPE }}" -DWARNINGS_ARE_ERRORS="${USE_WAE}" -DWITH_DEMOS=OFF -DWITH_INSTRUMENTS=OFF -DWITH_WAVETABLES=OFF -DBUILD_GUI="${{ matrix.variant.build_gui }}" -DCONSOLE_SUBSYSTEM="${{ matrix.variant.console_subsystem }}" "${CMAKE_EXTRA_ARGS[@]}"  
+  
+    - name: Build  
+      run: |  
+        cmake --build "${PWD}/build" --config "${{ env.BUILD_TYPE }}" --parallel ${{ steps.build-cores.outputs.amount }}  
+  
+    - name: Locate build outputs (binary sniffing)  
+      id: locate-bin  
+      run: |  
+        bundle_path=$(find "${PWD}/build" -type d -name "*.app" -print -quit)  
+        bin_path=$(find "${PWD}/build" -type f -iname "furnace*" -print | while read -r candidate; do if file "$candidate" | grep -q -E "executable|Mach-O|PE32"; then echo "$candidate"; break; fi; done)  
+        if [ -z "$bin_path" ]; then echo "::error::sniffing failed: no furnace executable found"; exit 1; fi  
+        echo "bundle_path=${bundle_path}" >> "$GITHUB_OUTPUT"  
+        echo "bin_path=${bin_path}" >> "$GITHUB_OUTPUT"  
+        echo "bin_dir=$(dirname "$bin_path")" >> "$GITHUB_OUTPUT"  
+        echo "bin_name=$(basename "$bin_path")" >> "$GITHUB_OUTPUT"  
+        file "$bin_path"  
+        ls -l "$bin_path"  
 
     - name: Package [Windows]
       if: ${{ runner.os == 'Windows' || matrix.config.compiler == 'mingw' }}
